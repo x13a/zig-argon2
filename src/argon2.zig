@@ -7,9 +7,8 @@ const blake2 = crypto.hash.blake2;
 const crypto = std.crypto;
 const math = std.math;
 const mem = std.mem;
+const phc_format = pwhash.phc_format;
 const pwhash = crypto.pwhash;
-
-const phc_format = @import("phc_encoding.zig");
 
 const Thread = std.Thread;
 const Blake2b128 = blake2.Blake2b128;
