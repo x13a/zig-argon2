@@ -2,6 +2,9 @@ const std = @import("std");
 
 pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
+    const lib = b.addStaticLibrary("argon2", "src/argon2.zig");
+    lib.setBuildMode(mode);
+    lib.install();
 
     var main_tests = b.addTest("src/tests.zig");
     main_tests.setBuildMode(mode);
