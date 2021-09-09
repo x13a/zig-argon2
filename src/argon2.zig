@@ -802,7 +802,7 @@ test "kdf" {
     }
 }
 
-test "13 derived_key.len" {
+test "hasher" {
     const password = "testpass";
     const salt = "saltsalt";
 
