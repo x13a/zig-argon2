@@ -7,6 +7,9 @@ const blake2 = crypto.hash.blake2;
 const crypto = std.crypto;
 const math = std.math;
 const mem = std.mem;
+const pwhash = crypto.pwhash;
+
+const phc_format = @import("phc_encoding.zig");
 
 const Thread = std.Thread;
 const Blake2b128 = blake2.Blake2b128;
@@ -15,19 +18,48 @@ const Blake2b192 = blake2.Blake2b(192);
 const Blake2b256 = blake2.Blake2b256;
 const Blake2b384 = blake2.Blake2b384;
 const Blake2b512 = blake2.Blake2b512;
-const KdfError = crypto.pwhash.KdfError || Thread.SpawnError;
 const Blocks = std.ArrayListAligned([block_length]u64, 16);
 const H0 = [Blake2b512.digest_length + 8]u8;
+
+const KdfError = pwhash.KdfError || Thread.SpawnError;
+const HasherError = pwhash.HasherError || KdfError;
 
 const version = 0x13;
 const block_length = 128;
 const sync_points = 4;
 const max_int = 0xffff_ffff;
 
+const default_salt_len = 32;
+const default_hash_len = 32;
+const max_salt_len = 64;
+const max_hash_len = 64;
+
 pub const Mode = enum(u2) {
+    const Self = @This();
+
     argon2d,
     argon2i,
     argon2id,
+
+    fn toString(self: Self) []const u8 {
+        return switch (self) {
+            Self.argon2d => "argon2d",
+            Self.argon2i => "argon2i",
+            Self.argon2id => "argon2id",
+        };
+    }
+
+    fn fromString(str: []const u8) crypto.errors.EncodingError!Self {
+        if (mem.eql(u8, str, "argon2d")) {
+            return Self.argon2d;
+        } else if (mem.eql(u8, str, "argon2i")) {
+            return Self.argon2i;
+        } else if (mem.eql(u8, str, "argon2id")) {
+            return Self.argon2id;
+        } else {
+            return crypto.errors.EncodingError.InvalidEncoding;
+        }
+    }
 };
 
 pub const Params = struct {
@@ -528,6 +560,66 @@ pub fn kdf(
     extractKey(&blocks, memory, params.p, derived_key, hasher);
 }
 
+const PhcFormatHasher = struct {
+    const BinValue = phc_format.BinValue;
+
+    const HashResult = struct {
+        alg_id: []const u8,
+        t: u32,
+        m: u32,
+        p: u8,
+        salt: BinValue(max_salt_len),
+        hash: BinValue(max_hash_len),
+    };
+
+    pub fn create(
+        allocator: *mem.Allocator,
+        password: []const u8,
+        params: Params,
+        buf: []u8,
+    ) HasherError![]const u8 {
+        var salt: [default_salt_len]u8 = undefined;
+        crypto.random.bytes(&salt);
+
+        var hash: [default_hash_len]u8 = undefined;
+        try kdf(allocator, &hash, password, &salt, params, null);
+
+        return phc_format.serialize(HashResult{
+            .alg_id = params.mode.toString(),
+            .t = params.t,
+            .m = params.m,
+            .p = params.p,
+            .salt = try BinValue(max_salt_len).fromSlice(&salt),
+            .hash = try BinValue(max_hash_len).fromSlice(&hash),
+        }, buf);
+    }
+
+    pub fn verify(
+        allocator: *mem.Allocator,
+        str: []const u8,
+        password: []const u8,
+    ) HasherError!void {
+        const hash_result = try phc_format.deserialize(HashResult, str);
+
+        const mode = Mode.fromString(hash_result.alg_id) catch
+            return HasherError.PasswordVerificationFailed;
+        const params = Params{
+            .t = hash_result.t,
+            .m = hash_result.m,
+            .p = hash_result.p,
+            .mode = mode,
+        };
+
+        const expected_hash = hash_result.hash.constSlice();
+        var hash_buf: [max_hash_len]u8 = undefined;
+        if (expected_hash.len > hash_buf.len) return HasherError.InvalidEncoding;
+        var hash = hash_buf[0..expected_hash.len];
+
+        try kdf(allocator, hash, password, hash_result.salt.constSlice(), params, null);
+        if (!mem.eql(u8, hash, expected_hash)) return HasherError.PasswordVerificationFailed;
+    }
+};
+
 test "argon2d" {
     const password = [_]u8{0x01} ** 32;
     const salt = [_]u8{0x02} ** 16;
@@ -802,7 +894,7 @@ test "kdf" {
     }
 }
 
-test "hasher" {
+test "kdf hasher" {
     const password = "testpass";
     const salt = "saltsalt";
 
@@ -821,4 +913,18 @@ test "hasher" {
     _ = try std.fmt.hexToBytes(&want, hash);
 
     try std.testing.expectEqualSlices(u8, &dk, &want);
+}
+
+test "phc format hasher" {
+    const password = "testpass";
+    const allocator = std.testing.allocator;
+
+    var buf: [128]u8 = undefined;
+    const hash = try PhcFormatHasher.create(
+        allocator,
+        password,
+        .{ .t = 3, .m = 32, .p = 4, .mode = .argon2id },
+        &buf,
+    );
+    try PhcFormatHasher.verify(allocator, hash, password);
 }
