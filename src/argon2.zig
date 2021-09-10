@@ -85,8 +85,6 @@ pub const Mode = enum(u2) {
 ///
 /// A [p]arallelism degree, which defines the number of parallel threads.
 ///
-/// The [mode] parameter, which is argon2 type.
-///
 /// The [secret] parameter, which is used for keyed hashing. This allows a secret key to be input 
 /// at hashing time (from some external location) and be folded into the value of the hash. This 
 /// means that even if your salts and hashes are compromised, an attacker cannot brute-force to 
@@ -103,29 +101,28 @@ pub const Params = struct {
     t: u32,
     m: u32,
     p: u8,
-    mode: Mode,
     secret: ?[]const u8 = null,
     ad: ?[]const u8 = null,
 
     /// Baseline parameters for interactive logins using argon2i type
-    pub const interactive_2i = Self.fromLimits(4, 33554432, .argon2i);
+    pub const interactive_2i = Self.fromLimits(4, 33554432);
     /// Baseline parameters for .. using argon2i type
-    pub const moderate_2i = Self.fromLimits(6, 134217728, .argon2i);
+    pub const moderate_2i = Self.fromLimits(6, 134217728);
     /// Baseline parameters for offline usage using argon2i type
-    pub const sensitive_2i = Self.fromLimits(8, 536870912, .argon2i);
+    pub const sensitive_2i = Self.fromLimits(8, 536870912);
 
     /// Baseline parameters for interactive logins using argon2id type
-    pub const interactive_2id = Self.fromLimits(2, 67108864, .argon2id);
+    pub const interactive_2id = Self.fromLimits(2, 67108864);
     /// Baseline parameters for .. using argon2id type
-    pub const moderate_2id = Self.fromLimits(3, 268435456, .argon2id);
+    pub const moderate_2id = Self.fromLimits(3, 268435456);
     /// Baseline parameters for offline usage using argon2id type
-    pub const sensitive_2id = Self.fromLimits(4, 1073741824, .argon2id);
+    pub const sensitive_2id = Self.fromLimits(4, 1073741824);
 
     /// Create parameters from ops and mem limits
-    pub fn fromLimits(ops_limit: u32, mem_limit: usize, mode: Mode) Self {
+    pub fn fromLimits(ops_limit: u32, mem_limit: usize) Self {
         const m = mem_limit / 1024;
         std.assert.debug(m <= max_int);
-        return .{ .t = ops_limit, .m = @intCast(u32, m), .p = 1, .mode = mode };
+        return .{ .t = ops_limit, .m = @intCast(u32, m), .p = 1 };
     }
 };
 
@@ -134,6 +131,7 @@ fn initHash(
     salt: []const u8,
     params: Params,
     dk_len: usize,
+    mode: Mode,
 ) H0 {
     var h0: H0 = undefined;
     var parameters: [24]u8 = undefined;
@@ -144,7 +142,7 @@ fn initHash(
     mem.writeIntLittle(u32, parameters[8..12], params.m);
     mem.writeIntLittle(u32, parameters[12..16], params.t);
     mem.writeIntLittle(u32, parameters[16..20], version);
-    mem.writeIntLittle(u32, parameters[20..24], @enumToInt(params.mode));
+    mem.writeIntLittle(u32, parameters[20..24], @enumToInt(mode));
     b2.update(&parameters);
     mem.writeIntLittle(u32, &tmp, @intCast(u32, password.len));
     b2.update(&tmp);
@@ -591,6 +589,7 @@ pub fn kdf(
     password: []const u8,
     salt: []const u8,
     params: Params,
+    mode: Mode,
     comptime hasher: ?type,
 ) KdfError!void {
     if (derived_key.len < 4 or derived_key.len > max_int) return KdfError.OutputTooLong;
@@ -605,7 +604,7 @@ pub fn kdf(
         derived_key.len != Blake2b384.digest_length and
         derived_key.len % Blake2b512.digest_length != 0) return KdfError.WeakParameters;
 
-    var h0 = initHash(password, salt, params, derived_key.len);
+    var h0 = initHash(password, salt, params, derived_key.len, mode);
     const memory = math.max(
         params.m / (sync_points * params.p) * (sync_points * params.p),
         2 * sync_points * params.p,
@@ -617,7 +616,7 @@ pub fn kdf(
     blocks.appendNTimesAssumeCapacity([_]u64{0} ** block_length, memory);
 
     initBlocks(&blocks, &h0, memory, params.p);
-    try processBlocks(&blocks, params.t, memory, params.p, params.mode);
+    try processBlocks(&blocks, params.t, memory, params.p, mode);
     extractKey(&blocks, memory, params.p, derived_key, hasher);
 }
 
@@ -637,16 +636,17 @@ const PhcFormatHasher = struct {
         allocator: *mem.Allocator,
         password: []const u8,
         params: Params,
+        mode: Mode,
         buf: []u8,
     ) HasherError![]const u8 {
         var salt: [default_salt_len]u8 = undefined;
         crypto.random.bytes(&salt);
 
         var hash: [default_hash_len]u8 = undefined;
-        try kdf(allocator, &hash, password, &salt, params, null);
+        try kdf(allocator, &hash, password, &salt, params, mode, null);
 
         return phc_format.serialize(HashResult{
-            .alg_id = params.mode.toString(),
+            .alg_id = mode.toString(),
             .t = params.t,
             .m = params.m,
             .p = params.p,
@@ -664,19 +664,14 @@ const PhcFormatHasher = struct {
 
         const mode = Mode.fromString(hash_result.alg_id) catch
             return HasherError.PasswordVerificationFailed;
-        const params = Params{
-            .t = hash_result.t,
-            .m = hash_result.m,
-            .p = hash_result.p,
-            .mode = mode,
-        };
+        const params = Params{ .t = hash_result.t, .m = hash_result.m, .p = hash_result.p };
 
         const expected_hash = hash_result.hash.constSlice();
         var hash_buf: [max_hash_len]u8 = undefined;
         if (expected_hash.len > hash_buf.len) return HasherError.InvalidEncoding;
         var hash = hash_buf[0..expected_hash.len];
 
-        try kdf(allocator, hash, password, hash_result.salt.constSlice(), params, null);
+        try kdf(allocator, hash, password, hash_result.salt.constSlice(), params, mode, null);
         if (!mem.eql(u8, hash, expected_hash)) return HasherError.PasswordVerificationFailed;
     }
 };
@@ -689,6 +684,7 @@ const PhcFormatHasher = struct {
 pub const HashOptions = struct {
     allocator: ?*mem.Allocator,
     kdf_params: Params,
+    mode: Mode,
     encoding: pwhash.Encoding,
 };
 
@@ -701,7 +697,13 @@ pub fn strHash(
 ) Error![]const u8 {
     const allocator = options.allocator orelse return Error.AllocatorRequired;
     switch (options.encoding) {
-        .phc => return PhcFormatHasher.create(allocator, password, options.kdf_params, out),
+        .phc => return PhcFormatHasher.create(
+            allocator,
+            password,
+            options.kdf_params,
+            options.mode,
+            out,
+        ),
         .crypt => return Error.InvalidEncoding,
     }
 }
@@ -735,7 +737,8 @@ test "argon2d" {
         &dk,
         &password,
         &salt,
-        .{ .t = 3, .m = 32, .p = 4, .mode = .argon2d, .secret = &secret, .ad = &ad },
+        .{ .t = 3, .m = 32, .p = 4, .secret = &secret, .ad = &ad },
+        .argon2d,
         null,
     );
 
@@ -760,7 +763,8 @@ test "argon2i" {
         &dk,
         &password,
         &salt,
-        .{ .t = 3, .m = 32, .p = 4, .mode = .argon2i, .secret = &secret, .ad = &ad },
+        .{ .t = 3, .m = 32, .p = 4, .secret = &secret, .ad = &ad },
+        .argon2i,
         null,
     );
 
@@ -785,7 +789,8 @@ test "argon2id" {
         &dk,
         &password,
         &salt,
-        .{ .t = 3, .m = 32, .p = 4, .mode = .argon2id, .secret = &secret, .ad = &ad },
+        .{ .t = 3, .m = 32, .p = 4, .secret = &secret, .ad = &ad },
+        .argon2id,
         null,
     );
 
@@ -989,7 +994,8 @@ test "kdf" {
             &dk,
             password,
             salt,
-            .{ .t = v.time, .m = v.memory, .p = v.threads, .mode = v.mode },
+            .{ .t = v.time, .m = v.memory, .p = v.threads },
+            v.mode,
             null,
         );
 
@@ -1007,7 +1013,8 @@ test "kdf hasher" {
         &dk,
         password,
         salt,
-        .{ .t = 3, .m = 32, .p = 4, .mode = .argon2id },
+        .{ .t = 3, .m = 32, .p = 4 },
+        .argon2id,
         blake2.Blake2b(13 * 8),
     );
 
@@ -1026,7 +1033,8 @@ test "phc format hasher" {
     const hash = try PhcFormatHasher.create(
         allocator,
         password,
-        .{ .t = 3, .m = 32, .p = 4, .mode = .argon2id },
+        .{ .t = 3, .m = 32, .p = 4 },
+        .argon2id,
         &buf,
     );
     try PhcFormatHasher.verify(allocator, hash, password);
@@ -1041,7 +1049,8 @@ test "password hash and password verify" {
         password,
         .{
             .allocator = allocator,
-            .kdf_params = .{ .t = 3, .m = 32, .p = 4, .mode = .argon2id },
+            .kdf_params = .{ .t = 3, .m = 32, .p = 4 },
+            .mode = .argon2id,
             .encoding = .phc,
         },
         &buf,
