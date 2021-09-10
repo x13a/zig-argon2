@@ -20,8 +20,10 @@ const Blake2b512 = blake2.Blake2b512;
 const Blocks = std.ArrayListAligned([block_length]u64, 16);
 const H0 = [Blake2b512.digest_length + 8]u8;
 
+const EncodingError = crypto.errors.EncodingError;
 const KdfError = pwhash.KdfError || Thread.SpawnError;
 const HasherError = pwhash.HasherError || KdfError;
+const Error = pwhash.Error || HasherError;
 
 const version = 0x13;
 const block_length = 128;
@@ -48,7 +50,7 @@ pub const Mode = enum(u2) {
         };
     }
 
-    fn fromString(str: []const u8) crypto.errors.EncodingError!Self {
+    fn fromString(str: []const u8) EncodingError!Self {
         if (mem.eql(u8, str, "argon2d")) {
             return Self.argon2d;
         } else if (mem.eql(u8, str, "argon2i")) {
@@ -56,7 +58,7 @@ pub const Mode = enum(u2) {
         } else if (mem.eql(u8, str, "argon2id")) {
             return Self.argon2id;
         } else {
-            return crypto.errors.EncodingError.InvalidEncoding;
+            return EncodingError.InvalidEncoding;
         }
     }
 };
@@ -619,6 +621,37 @@ const PhcFormatHasher = struct {
     }
 };
 
+pub const HashOptions = struct {
+    allocator: ?*mem.Allocator,
+    kdf_params: Params,
+    encoding: pwhash.Encoding,
+};
+
+pub fn strHash(
+    password: []const u8,
+    options: HashOptions,
+    out: []u8,
+) Error![]const u8 {
+    const allocator = options.allocator orelse return Error.AllocatorRequired;
+    switch (options.encoding) {
+        .phc => return PhcFormatHasher.create(allocator, password, options.kdf_params, out),
+        .crypt => return Error.InvalidEncoding,
+    }
+}
+
+pub const VerifyOptions = struct {
+    allocator: ?*mem.Allocator,
+};
+
+pub fn strVerify(
+    str: []const u8,
+    password: []const u8,
+    options: VerifyOptions,
+) Error!void {
+    const allocator = options.allocator orelse return Error.AllocatorRequired;
+    return PhcFormatHasher.verify(allocator, str, password);
+}
+
 test "argon2d" {
     const password = [_]u8{0x01} ** 32;
     const salt = [_]u8{0x02} ** 16;
@@ -926,4 +959,21 @@ test "phc format hasher" {
         &buf,
     );
     try PhcFormatHasher.verify(allocator, hash, password);
+}
+
+test "password hash and password verify" {
+    const password = "testpass";
+    const allocator = std.testing.allocator;
+
+    var buf: [128]u8 = undefined;
+    const hash = try strHash(
+        password,
+        .{
+            .allocator = allocator,
+            .kdf_params = .{ .t = 3, .m = 32, .p = 4, .mode = .argon2id },
+            .encoding = .phc,
+        },
+        &buf,
+    );
+    try strVerify(hash, password, .{ .allocator = allocator });
 }
