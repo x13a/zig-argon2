@@ -64,12 +64,28 @@ pub const Mode = enum(u2) {
 };
 
 pub const Params = struct {
+    const Self = @This();
+
     t: u32,
     m: u32,
     p: u8,
     mode: Mode,
     secret: ?[]const u8 = null,
     ad: ?[]const u8 = null,
+
+    pub const interactive_2i = Self.fromLimits(4, 33554432, .argon2i);
+    pub const moderate_2i = Self.fromLimits(6, 134217728, .argon2i);
+    pub const sensitive_2i = Self.fromLimits(8, 536870912, .argon2i);
+
+    pub const interactive_2id = Self.fromLimits(2, 67108864, .argon2id);
+    pub const moderate_2id = Self.fromLimits(3, 268435456, .argon2id);
+    pub const sensitive_2id = Self.fromLimits(4, 1073741824, .argon2id);
+
+    pub fn fromLimits(ops_limit: u32, mem_limit: usize, mode: Mode) Self {
+        const m = mem_limit / 1024;
+        std.assert.debug(m <= max_int);
+        return .{ .t = ops_limit, .m = @intCast(u32, m), .p = 1, .mode = mode };
+    }
 };
 
 fn initHash(
