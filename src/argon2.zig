@@ -35,6 +35,19 @@ const default_hash_len = 32;
 const max_salt_len = 64;
 const max_hash_len = 64;
 
+/// Argon2 type
+///
+/// Argon2d is faster and uses data-depending memory access, which makes it highly resistant 
+/// against GPU cracking attacks and suitable for applications with no threats from side-channel 
+/// timing attacks (eg. cryptocurrencies).
+///
+/// Argon2i instead uses data-independent memory access, which is preferred for password 
+/// hashing and password-based key derivation, but it is slower as it makes more passes over 
+/// the memory to protect from tradeoff attacks.
+///
+/// Argon2id is a hybrid of Argon2i and Argon2d, using a combination of data-depending and 
+/// data-independent memory accesses, which gives some of Argon2i's resistance to side-channel 
+/// cache timing attacks and much of Argon2d's resistance to GPU cracking attacks.
 pub const Mode = enum(u2) {
     const Self = @This();
 
@@ -63,6 +76,27 @@ pub const Mode = enum(u2) {
     }
 };
 
+/// Argon2 parameters
+///
+/// A [t]ime cost, which defines the amount of computation realized and therefore the execution 
+/// time, given in number of iterations.
+///
+/// A [m]emory cost, which defines the memory usage, given in kibibytes.
+///
+/// A [p]arallelism degree, which defines the number of parallel threads.
+///
+/// The [mode] parameter, which is argon2 type.
+///
+/// The [secret] parameter, which is used for keyed hashing. This allows a secret key to be input 
+/// at hashing time (from some external location) and be folded into the value of the hash. This 
+/// means that even if your salts and hashes are compromised, an attacker cannot brute-force to 
+/// find the password without the key.
+///
+/// The [ad] parameter, which is used to fold any additional data into the hash value. Functionally, 
+/// this behaves almost exactly like the secret or salt parameters; the ad parameter is folding 
+/// into the value of the hash. However, this parameter is used for different data. The salt 
+/// should be a random string stored alongside your password. The secret should be a random key 
+/// only usable at hashing time. The ad is for any other data.
 pub const Params = struct {
     const Self = @This();
 
@@ -73,14 +107,21 @@ pub const Params = struct {
     secret: ?[]const u8 = null,
     ad: ?[]const u8 = null,
 
+    /// Baseline parameters for interactive logins using argon2i type
     pub const interactive_2i = Self.fromLimits(4, 33554432, .argon2i);
+    /// Baseline parameters for .. using argon2i type
     pub const moderate_2i = Self.fromLimits(6, 134217728, .argon2i);
+    /// Baseline parameters for offline usage using argon2i type
     pub const sensitive_2i = Self.fromLimits(8, 536870912, .argon2i);
 
+    /// Baseline parameters for interactive logins using argon2id type
     pub const interactive_2id = Self.fromLimits(2, 67108864, .argon2id);
+    /// Baseline parameters for .. using argon2id type
     pub const moderate_2id = Self.fromLimits(3, 268435456, .argon2id);
+    /// Baseline parameters for offline usage using argon2id type
     pub const sensitive_2id = Self.fromLimits(4, 1073741824, .argon2id);
 
+    /// Create parameters from ops and mem limits
     pub fn fromLimits(ops_limit: u32, mem_limit: usize, mode: Mode) Self {
         const m = mem_limit / 1024;
         std.assert.debug(m <= max_int);
@@ -541,6 +582,9 @@ fn phi(
     return lane * lanes + @intCast(u32, ((s + m - (p + 1)) % lanes));
 }
 
+/// Derives a key from the password, salt, and argon2 parameters.
+///
+/// The [hasher] is required for derived_key with length not in [16, 20, 24, 32, 48, 64, l%64].
 pub fn kdf(
     allocator: *mem.Allocator,
     derived_key: []u8,
@@ -637,12 +681,19 @@ const PhcFormatHasher = struct {
     }
 };
 
+/// Options for hashing a password.
+///
+/// Allocator is required for argon2.
+///
+/// Only phc encoding is supported.
 pub const HashOptions = struct {
     allocator: ?*mem.Allocator,
     kdf_params: Params,
     encoding: pwhash.Encoding,
 };
 
+/// Compute a hash of a password using the argon2 key derivation function.
+/// The function returns a string that includes all the parameters required for verification.
 pub fn strHash(
     password: []const u8,
     options: HashOptions,
@@ -655,10 +706,14 @@ pub fn strHash(
     }
 }
 
+/// Options for hash verification.
+///
+/// Allocator is required for argon2.
 pub const VerifyOptions = struct {
     allocator: ?*mem.Allocator,
 };
 
+/// Verify that a previously computed hash is valid for a given password.
 pub fn strVerify(
     str: []const u8,
     password: []const u8,
