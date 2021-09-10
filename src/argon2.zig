@@ -593,8 +593,9 @@ pub fn kdf(
     comptime hasher: ?type,
 ) KdfError!void {
     if (derived_key.len < 4 or derived_key.len > max_int) return KdfError.OutputTooLong;
+    if (password.len > max_int) return KdfError.WeakParameters;
+    if (salt.len < 8 or salt.len > max_int) return KdfError.WeakParameters;
     if (params.t < 1 or params.p < 1) return KdfError.WeakParameters;
-    if (password.len > max_int or salt.len > max_int) return KdfError.WeakParameters;
 
     if (hasher == null and
         derived_key.len != Blake2b128.digest_length and
