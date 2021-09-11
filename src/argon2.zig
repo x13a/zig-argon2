@@ -582,7 +582,8 @@ fn phi(
 
 /// Derives a key from the password, salt, and argon2 parameters.
 ///
-/// The [hasher] is required for derived_key with length not in [16, 20, 24, 32, 48, 64, l%64].
+/// The [hasher] is Blake2b(derived_key.len * 8). It is required when derived_key length 
+/// not in [16, 20, 24, 32, 48, 64, l%64].
 pub fn kdf(
     allocator: *mem.Allocator,
     derived_key: []u8,
