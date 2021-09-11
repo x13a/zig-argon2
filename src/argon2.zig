@@ -182,18 +182,18 @@ fn blake2bHash(out: []u8, in: []const u8, comptime hasher: type) void {
     b2.final(buffer[0..hasher.digest_length]);
     b2 = hasher.init(.{});
     mem.copy(u8, out, buffer[0..32]);
-    var out_tmp = out[32..];
-    while (out_tmp.len > Blake2b512.digest_length) : ({
-        out_tmp = out_tmp[32..];
+    var out_slice = out[32..];
+    while (out_slice.len > Blake2b512.digest_length) : ({
+        out_slice = out_slice[32..];
         b2 = hasher.init(.{});
     }) {
         b2.update(&buffer);
         b2.final(buffer[0..hasher.digest_length]);
-        mem.copy(u8, out_tmp, buffer[0..32]);
+        mem.copy(u8, out_slice, buffer[0..32]);
     }
 
     b2.update(&buffer);
-    b2.final(out_tmp[0..hasher.digest_length]);
+    b2.final(out_slice[0..hasher.digest_length]);
 }
 
 fn initBlocks(
@@ -690,9 +690,9 @@ const PhcFormatHasher = struct {
 /// Only phc encoding is supported.
 pub const HashOptions = struct {
     allocator: ?*mem.Allocator,
-    kdf_params: Params,
-    mode: Mode,
-    encoding: pwhash.Encoding,
+    params: Params,
+    mode: Mode = .argon2id,
+    encoding: pwhash.Encoding = .phc,
 };
 
 /// Compute a hash of a password using the argon2 key derivation function.
@@ -707,7 +707,7 @@ pub fn strHash(
         .phc => return PhcFormatHasher.create(
             allocator,
             password,
-            options.kdf_params,
+            options.params,
             options.mode,
             out,
         ),
@@ -1054,12 +1054,7 @@ test "password hash and password verify" {
     var buf: [128]u8 = undefined;
     const hash = try strHash(
         password,
-        .{
-            .allocator = allocator,
-            .kdf_params = .{ .t = 3, .m = 32, .p = 4 },
-            .mode = .argon2id,
-            .encoding = .phc,
-        },
+        .{ .allocator = allocator, .params = .{ .t = 3, .m = 32, .p = 4 } },
         &buf,
     );
     try strVerify(hash, password, .{ .allocator = allocator });
