@@ -177,7 +177,7 @@ fn blake2bHash(out: []u8, in: []const u8, comptime hasher: type) void {
         return;
     }
 
-    std.debug.assert(out.len % Blake2b512.digest_length == 0);
+    std.debug.assert(out.len % 32 == 0);
 
     b2.final(buffer[0..hasher.digest_length]);
     b2 = hasher.init(.{});
@@ -524,7 +524,7 @@ fn extractKey(
         Blake2b160.digest_length => blake2bHash(out, &block, Blake2b160),
         Blake2b128.digest_length => blake2bHash(out, &block, Blake2b128),
         else => {
-            if (out.len % Blake2b512.digest_length == 0) {
+            if (out.len % 32 == 0) {
                 blake2bHash(out, &block, Blake2b512);
             } else if (hasher) |h| {
                 blake2bHash(out, &block, h);
@@ -582,8 +582,12 @@ fn phi(
 
 /// Derives a key from the password, salt, and argon2 parameters.
 ///
-/// The [hasher] is Blake2b(derived_key.len * 8). It is required when derived_key length 
-/// not in [16, 20, 24, 32, 48, 64, l%64].
+/// Derived key [l]ength has to be in 4 <= l <= 64 or l % 32 == 0.
+///
+/// Salt has to be at least 8 bytes legth.
+///
+/// The [hasher] is Blake2b(derived_key.len * 8). It is required when derived_key [l]ength 
+/// not in [16, 20, 24, 32, 48, 64] and l < 64.
 pub fn kdf(
     allocator: *mem.Allocator,
     derived_key: []u8,
@@ -604,7 +608,8 @@ pub fn kdf(
         derived_key.len != Blake2b192.digest_length and
         derived_key.len != Blake2b256.digest_length and
         derived_key.len != Blake2b384.digest_length and
-        derived_key.len % Blake2b512.digest_length != 0) return KdfError.WeakParameters;
+        derived_key.len != Blake2b512.digest_length and
+        derived_key.len % 32 != 0) return KdfError.WeakParameters;
 
     var h0 = initHash(password, salt, params, derived_key.len, mode);
     const memory = math.max(
@@ -1058,4 +1063,55 @@ test "password hash and password verify" {
         &buf,
     );
     try strVerify(hash, password, .{ .allocator = allocator });
+}
+
+test "kdf long derived key" {
+    const password = "testpass";
+    const salt = "saltsalt";
+
+    var dk1: [96]u8 = undefined;
+    try kdf(
+        std.testing.allocator,
+        &dk1,
+        password,
+        salt,
+        .{ .t = 3, .m = 32, .p = 4 },
+        .argon2id,
+        null,
+    );
+
+    const hash1 = "46dea5a157e759fbba47266959adb96e" ++
+        "9c7b8410815ef25d539fec394bc69031" ++
+        "54f4b213c03008f7012ff20501cede60" ++
+        "6972174a08120f74014350099f854504" ++
+        "7dd48f37834da484686de9bbd7d1e8d4" ++
+        "c0eaeacbfed67982dd1bd3c17955b96c";
+    var want1: [hash1.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&want1, hash1);
+
+    try std.testing.expectEqualSlices(u8, &dk1, &want1);
+
+    var dk2: [128]u8 = undefined;
+    try kdf(
+        std.testing.allocator,
+        &dk2,
+        password,
+        salt,
+        .{ .t = 3, .m = 32, .p = 4 },
+        .argon2id,
+        null,
+    );
+
+    const hash2 = "480fcb5859bb8250a5ffb10fcfd676d8" ++
+        "378748adebd7b73f34a0e0191fd66c6d" ++
+        "4abe42c44ea29396f37c81e3a1f943e4" ++
+        "e41fac1f4bdb3882a8e466bdff224dec" ++
+        "b681d64c8479d1affc21c07de3bb0b6a" ++
+        "35085a1921c50f44567ad3eb5c301856" ++
+        "61db48650edbdd717644a5e3f0d079d5" ++
+        "10ec3ded8f16217e263a6548ea9dbd90";
+    var want2: [hash2.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&want2, hash2);
+
+    try std.testing.expectEqualSlices(u8, &dk2, &want2);
 }
