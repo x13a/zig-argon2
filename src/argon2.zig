@@ -632,8 +632,9 @@ const PhcFormatHasher = struct {
 
     const HashResult = struct {
         alg_id: []const u8,
-        t: u32,
+        alg_version: ?u32,
         m: u32,
+        t: u32,
         p: u8,
         salt: BinValue(max_salt_len),
         hash: BinValue(max_hash_len),
@@ -654,8 +655,9 @@ const PhcFormatHasher = struct {
 
         return phc_format.serialize(HashResult{
             .alg_id = mode.toString(),
-            .t = params.t,
+            .alg_version = version,
             .m = params.m,
+            .t = params.t,
             .p = params.p,
             .salt = try BinValue(max_salt_len).fromSlice(&salt),
             .hash = try BinValue(max_hash_len).fromSlice(&hash),
@@ -671,6 +673,9 @@ const PhcFormatHasher = struct {
 
         const mode = Mode.fromString(hash_result.alg_id) catch
             return HasherError.PasswordVerificationFailed;
+        if (hash_result.alg_version) |v| {
+            if (v != version) return HasherError.InvalidEncoding;
+        }
         const params = Params{ .t = hash_result.t, .m = hash_result.m, .p = hash_result.p };
 
         const expected_hash = hash_result.hash.constSlice();
