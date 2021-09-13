@@ -1,4 +1,4 @@
-// https://tools.ietf.org/id/draft-irtf-cfrg-argon2-13.html
+// https://datatracker.ietf.org/doc/rfc9106
 // https://github.com/golang/crypto/tree/master/argon2
 // https://github.com/P-H-C/phc-winner-argon2
 
@@ -13,11 +13,6 @@ const phc_format = pwhash.phc_format;
 const pwhash = crypto.pwhash;
 
 const Thread = std.Thread;
-const Blake2b128 = blake2.Blake2b128;
-const Blake2b160 = blake2.Blake2b160;
-const Blake2b192 = blake2.Blake2b(192);
-const Blake2b256 = blake2.Blake2b256;
-const Blake2b384 = blake2.Blake2b384;
 const Blake2b512 = blake2.Blake2b512;
 const Blocks = std.ArrayListAligned([block_length]u64, 16);
 const H0 = [Blake2b512.digest_length + 8]u8;
@@ -102,7 +97,7 @@ pub const Params = struct {
 
     t: u32,
     m: u32,
-    p: u8,
+    p: u24,
     secret: ?[]const u8 = null,
     ad: ?[]const u8 = null,
 
@@ -123,7 +118,7 @@ pub const Params = struct {
     /// Create parameters from ops and mem limits
     pub fn fromLimits(ops_limit: u32, mem_limit: usize) Self {
         const m = mem_limit / 1024;
-        std.assert.debug(m <= max_int);
+        std.debug.assert(m <= max_int);
         return .{ .t = ops_limit, .m = @intCast(u32, m), .p = 1 };
     }
 };
@@ -166,58 +161,63 @@ fn initHash(
     return h0;
 }
 
-fn blake2bHash(out: []u8, in: []const u8, comptime hasher: type) void {
-    var b2 = hasher.init(.{});
+fn blake2bLong(out: []u8, in: []const u8) void {
+    var b2 = Blake2b512.init(.{ .expected_out_bits = math.min(512, out.len * 8) });
 
     var buffer: [Blake2b512.digest_length]u8 = undefined;
     mem.writeIntLittle(u32, buffer[0..4], @intCast(u32, out.len));
     b2.update(buffer[0..4]);
     b2.update(in);
+    b2.final(&buffer);
 
     if (out.len <= Blake2b512.digest_length) {
-        b2.final(out[0..hasher.digest_length]);
+        mem.copy(u8, out, buffer[0..out.len]);
         return;
     }
 
-    std.debug.assert(out.len % 32 == 0);
-
-    b2.final(buffer[0..hasher.digest_length]);
-    b2 = hasher.init(.{});
+    b2 = Blake2b512.init(.{});
     mem.copy(u8, out, buffer[0..32]);
     var out_slice = out[32..];
     while (out_slice.len > Blake2b512.digest_length) : ({
         out_slice = out_slice[32..];
-        b2 = hasher.init(.{});
+        b2 = Blake2b512.init(.{});
     }) {
         b2.update(&buffer);
-        b2.final(buffer[0..hasher.digest_length]);
+        b2.final(&buffer);
         mem.copy(u8, out_slice, buffer[0..32]);
     }
 
+    var r = Blake2b512.digest_length;
+    if (out.len % Blake2b512.digest_length > 0) {
+        r = ((out.len + 31) / 32) - 2;
+        b2 = Blake2b512.init(.{ .expected_out_bits = r * 8 });
+    }
+
     b2.update(&buffer);
-    b2.final(out_slice[0..hasher.digest_length]);
+    b2.final(&buffer);
+    mem.copy(u8, out_slice, buffer[0..r]);
 }
 
 fn initBlocks(
     blocks: *Blocks,
     h0: *H0,
     memory: u32,
-    threads: u32,
+    threads: u24,
 ) void {
     var block0: [1024]u8 = undefined;
-    var lane: u32 = 0;
+    var lane: u24 = 0;
     while (lane < threads) : (lane += 1) {
         const j = lane * (memory / threads);
         mem.writeIntLittle(u32, h0[Blake2b512.digest_length + 4 ..][0..4], lane);
 
         mem.writeIntLittle(u32, h0[Blake2b512.digest_length..][0..4], 0);
-        blake2bHash(&block0, h0, Blake2b512);
+        blake2bLong(&block0, h0);
         for (blocks.items[j + 0]) |*v, i| {
             v.* = mem.readIntLittle(u64, block0[i * 8 ..][0..8]);
         }
 
         mem.writeIntLittle(u32, h0[Blake2b512.digest_length..][0..4], 1);
-        blake2bHash(&block0, h0, Blake2b512);
+        blake2bLong(&block0, h0);
         for (blocks.items[j + 1]) |*v, i| {
             v.* = mem.readIntLittle(u64, block0[i * 8 ..][0..8]);
         }
@@ -225,19 +225,20 @@ fn initBlocks(
 }
 
 fn processBlocks(
+    allocator: *mem.Allocator,
     blocks: *Blocks,
     time: u32,
     memory: u32,
-    threads: u32,
+    threads: u24,
     mode: Mode,
-) Thread.SpawnError!void {
+) KdfError!void {
     const lanes = memory / threads;
     const segments = lanes / sync_points;
 
     if (builtin.single_threaded or threads == 1) {
         processBlocksSt(blocks, time, memory, threads, mode, lanes, segments);
     } else {
-        try processBlocksMt(blocks, time, memory, threads, mode, lanes, segments);
+        try processBlocksMt(allocator, blocks, time, memory, threads, mode, lanes, segments);
     }
 }
 
@@ -245,7 +246,7 @@ fn processBlocksSt(
     blocks: *Blocks,
     time: u32,
     memory: u32,
-    threads: u32,
+    threads: u24,
     mode: Mode,
     lanes: u32,
     segments: u32,
@@ -254,7 +255,7 @@ fn processBlocksSt(
     while (n < time) : (n += 1) {
         var slice: u32 = 0;
         while (slice < sync_points) : (slice += 1) {
-            var lane: u32 = 0;
+            var lane: u24 = 0;
             while (lane < threads) : (lane += 1) {
                 processSegment(blocks, time, memory, threads, mode, lanes, segments, n, slice, lane);
             }
@@ -263,55 +264,59 @@ fn processBlocksSt(
 }
 
 fn processBlocksMt(
+    allocator: *mem.Allocator,
     blocks: *Blocks,
     time: u32,
     memory: u32,
-    threads: u32,
+    threads: u24,
     mode: Mode,
     lanes: u32,
     segments: u32,
-) Thread.SpawnError!void {
-    var threads_arr: [256]Thread = undefined;
+) KdfError!void {
+    var threads_list = try std.ArrayList(Thread).initCapacity(allocator, threads);
+    defer threads_list.deinit();
+
     var n: u32 = 0;
     while (n < time) : (n += 1) {
         var slice: u32 = 0;
         while (slice < sync_points) : (slice += 1) {
-            var lane: u32 = 0;
+            var lane: u24 = 0;
             while (lane < threads) : (lane += 1) {
                 const thread = try Thread.spawn(.{}, processSegment, .{
                     blocks, time, memory, threads, mode, lanes, segments, n, slice, lane,
                 });
-                threads_arr[lane] = thread;
+                threads_list.appendAssumeCapacity(thread);
             }
             lane = 0;
             while (lane < threads) : (lane += 1) {
-                threads_arr[lane].join();
+                threads_list.items[lane].join();
             }
+            threads_list.clearRetainingCapacity();
         }
     }
 }
 
 fn processSegment(
     blocks: *Blocks,
-    time: u32,
+    passes: u32,
     memory: u32,
-    threads: u32,
+    threads: u24,
     mode: Mode,
     lanes: u32,
     segments: u32,
     n: u32,
     slice: u32,
-    lane: u32,
+    lane: u24,
 ) void {
     var addresses align(16) = [_]u64{0} ** block_length;
     var in align(16) = [_]u64{0} ** block_length;
-    var zero align(16) = [_]u64{0} ** block_length;
+    const zero align(16) = [_]u64{0} ** block_length;
     if (mode == .argon2i or (mode == .argon2id and n == 0 and slice < sync_points / 2)) {
         in[0] = n;
         in[1] = lane;
         in[2] = slice;
         in[3] = memory;
-        in[4] = time;
+        in[4] = passes;
         in[5] = @enumToInt(mode);
     }
     var index: u32 = 0;
@@ -368,7 +373,7 @@ fn processBlockGeneric(
     out: *[block_length]u64,
     in1: *const [block_length]u64,
     in2: *const [block_length]u64,
-    xor: bool,
+    comptime xor: bool,
 ) void {
     var t: [block_length]u64 = undefined;
     for (t) |*v, i| {
@@ -376,45 +381,22 @@ fn processBlockGeneric(
     }
     var i: usize = 0;
     while (i < block_length) : (i += 16) {
-        blamkaGeneric(
-            &t[i + 0],
-            &t[i + 1],
-            &t[i + 2],
-            &t[i + 3],
-            &t[i + 4],
-            &t[i + 5],
-            &t[i + 6],
-            &t[i + 7],
-            &t[i + 8],
-            &t[i + 9],
-            &t[i + 10],
-            &t[i + 11],
-            &t[i + 12],
-            &t[i + 13],
-            &t[i + 14],
-            &t[i + 15],
-        );
+        blamkaGeneric(t[i..][0..16]);
     }
     i = 0;
+    var buffer: [16]u64 = undefined;
     while (i < block_length / 8) : (i += 2) {
-        blamkaGeneric(
-            &t[i],
-            &t[i + 1],
-            &t[16 + i],
-            &t[16 + i + 1],
-            &t[32 + i],
-            &t[32 + i + 1],
-            &t[48 + i],
-            &t[48 + i + 1],
-            &t[64 + i],
-            &t[64 + i + 1],
-            &t[80 + i],
-            &t[80 + i + 1],
-            &t[96 + i],
-            &t[96 + i + 1],
-            &t[112 + i],
-            &t[112 + i + 1],
-        );
+        var j: usize = 0;
+        while (j < block_length / 8) : (j += 2) {
+            buffer[j] = t[j * 8 + i];
+            buffer[j + 1] = t[j * 8 + i + 1];
+        }
+        blamkaGeneric(&buffer);
+        j = 0;
+        while (j < block_length / 8) : (j += 2) {
+            t[j * 8 + i] = buffer[j];
+            t[j * 8 + i + 1] = buffer[j + 1];
+        }
     }
     if (xor) {
         for (t) |v, j| {
@@ -434,34 +416,11 @@ fn Rp(a: usize, b: usize, c: usize, d: usize) QuarterRound {
 }
 
 fn fBlaMka(x: u64, y: u64) u64 {
-    const xy = (x & 0xffff_ffff) * (y & 0xffff_ffff);
+    const xy = @as(u64, @truncate(u32, x)) * @as(u64, @truncate(u32, y));
     return x +% y +% 2 *% xy;
 }
 
-fn blamkaGeneric(
-    t00: *u64,
-    t01: *u64,
-    t02: *u64,
-    t03: *u64,
-    t04: *u64,
-    t05: *u64,
-    t06: *u64,
-    t07: *u64,
-    t08: *u64,
-    t09: *u64,
-    t10: *u64,
-    t11: *u64,
-    t12: *u64,
-    t13: *u64,
-    t14: *u64,
-    t15: *u64,
-) void {
-    var x = [_]u64{
-        t00.*, t01.*, t02.*, t03.*,
-        t04.*, t05.*, t06.*, t07.*,
-        t08.*, t09.*, t10.*, t11.*,
-        t12.*, t13.*, t14.*, t15.*,
-    };
+fn blamkaGeneric(x: *[16]u64) void {
     const rounds = comptime [_]QuarterRound{
         Rp(0, 4, 8, 12),
         Rp(1, 5, 9, 13),
@@ -482,33 +441,16 @@ fn blamkaGeneric(
         x[r.c] = fBlaMka(x[r.c], x[r.d]);
         x[r.b] = math.rotr(u64, x[r.b] ^ x[r.c], 63);
     }
-    t00.* = x[0];
-    t01.* = x[1];
-    t02.* = x[2];
-    t03.* = x[3];
-    t04.* = x[4];
-    t05.* = x[5];
-    t06.* = x[6];
-    t07.* = x[7];
-    t08.* = x[8];
-    t09.* = x[9];
-    t10.* = x[10];
-    t11.* = x[11];
-    t12.* = x[12];
-    t13.* = x[13];
-    t14.* = x[14];
-    t15.* = x[15];
 }
 
-fn extractKey(
+fn finalize(
     blocks: *Blocks,
     memory: u32,
-    threads: u32,
+    threads: u24,
     out: []u8,
-    comptime hasher: ?type,
 ) void {
     const lanes = memory / threads;
-    var lane: u32 = 0;
+    var lane: u24 = 0;
     while (lane < threads - 1) : (lane += 1) {
         for (blocks.items[(lane * lanes) + lanes - 1]) |v, i| {
             blocks.items[memory - 1][i] ^= v;
@@ -518,33 +460,17 @@ fn extractKey(
     for (blocks.items[memory - 1]) |v, i| {
         mem.writeIntLittle(u64, block[i * 8 ..][0..8], v);
     }
-    switch (out.len) {
-        Blake2b512.digest_length => blake2bHash(out, &block, Blake2b512),
-        Blake2b384.digest_length => blake2bHash(out, &block, Blake2b384),
-        Blake2b256.digest_length => blake2bHash(out, &block, Blake2b256),
-        Blake2b192.digest_length => blake2bHash(out, &block, Blake2b192),
-        Blake2b160.digest_length => blake2bHash(out, &block, Blake2b160),
-        Blake2b128.digest_length => blake2bHash(out, &block, Blake2b128),
-        else => {
-            if (out.len % 32 == 0) {
-                blake2bHash(out, &block, Blake2b512);
-            } else if (hasher) |h| {
-                blake2bHash(out, &block, h);
-            } else {
-                unreachable;
-            }
-        },
-    }
+    blake2bLong(out, &block);
 }
 
 fn indexAlpha(
     rand: u64,
     lanes: u32,
     segments: u32,
-    threads: u32,
+    threads: u24,
     n: u32,
     slice: u32,
-    lane: u32,
+    lane: u24,
     index: u32,
 ) u32 {
     var ref_lane = @intCast(u32, rand >> 32) % threads;
@@ -566,30 +492,17 @@ fn indexAlpha(
     if (index == 0 or lane == ref_lane) {
         m -= 1;
     }
-    return phi(rand, m, s, ref_lane, lanes);
-}
-
-fn phi(
-    rand: u64,
-    m: u64,
-    s: u64,
-    lane: u32,
-    lanes: u32,
-) u32 {
-    var p = rand & 0xffff_ffff;
+    var p = @as(u64, @truncate(u32, rand));
     p = (p * p) >> 32;
     p = (p * m) >> 32;
-    return lane * lanes + @intCast(u32, ((s + m - (p + 1)) % lanes));
+    return ref_lane * lanes + @intCast(u32, ((s + m - (p + 1)) % lanes));
 }
 
 /// Derives a key from the password, salt, and argon2 parameters.
 ///
-/// Derived key [l]ength has to be in 4 <= l <= 64 or l % 32 == 0.
+/// Derived key has to be at least 4 bytes length.
 ///
-/// Salt has to be at least 8 bytes legth.
-///
-/// The [hasher] is Blake2b(derived_key.len * 8). It is required when derived_key [l]ength 
-/// not in [16, 20, 24, 32, 48, 64] and l < 64.
+/// Salt has to be at least 8 bytes length.
 pub fn kdf(
     allocator: *mem.Allocator,
     derived_key: []u8,
@@ -597,21 +510,11 @@ pub fn kdf(
     salt: []const u8,
     params: Params,
     mode: Mode,
-    comptime hasher: ?type,
 ) KdfError!void {
     if (derived_key.len < 4 or derived_key.len > max_int) return KdfError.OutputTooLong;
     if (password.len > max_int) return KdfError.WeakParameters;
     if (salt.len < 8 or salt.len > max_int) return KdfError.WeakParameters;
     if (params.t < 1 or params.p < 1) return KdfError.WeakParameters;
-
-    if (hasher == null and
-        derived_key.len != Blake2b128.digest_length and
-        derived_key.len != Blake2b160.digest_length and
-        derived_key.len != Blake2b192.digest_length and
-        derived_key.len != Blake2b256.digest_length and
-        derived_key.len != Blake2b384.digest_length and
-        derived_key.len != Blake2b512.digest_length and
-        derived_key.len % 32 != 0) return KdfError.WeakParameters;
 
     var h0 = initHash(password, salt, params, derived_key.len, mode);
     const memory = math.max(
@@ -625,8 +528,8 @@ pub fn kdf(
     blocks.appendNTimesAssumeCapacity([_]u64{0} ** block_length, memory);
 
     initBlocks(&blocks, &h0, memory, params.p);
-    try processBlocks(&blocks, params.t, memory, params.p, mode);
-    extractKey(&blocks, memory, params.p, derived_key, hasher);
+    try processBlocks(allocator, &blocks, params.t, memory, params.p, mode);
+    finalize(&blocks, memory, params.p, derived_key);
 }
 
 const PhcFormatHasher = struct {
@@ -637,7 +540,7 @@ const PhcFormatHasher = struct {
         alg_version: ?u32,
         m: u32,
         t: u32,
-        p: u8,
+        p: u24,
         salt: BinValue(max_salt_len),
         hash: BinValue(max_hash_len),
     };
@@ -653,7 +556,7 @@ const PhcFormatHasher = struct {
         crypto.random.bytes(&salt);
 
         var hash: [default_hash_len]u8 = undefined;
-        try kdf(allocator, &hash, password, &salt, params, mode, null);
+        try kdf(allocator, &hash, password, &salt, params, mode);
 
         return phc_format.serialize(HashResult{
             .alg_id = mode.toString(),
@@ -685,7 +588,7 @@ const PhcFormatHasher = struct {
         if (expected_hash.len > hash_buf.len) return HasherError.InvalidEncoding;
         var hash = hash_buf[0..expected_hash.len];
 
-        try kdf(allocator, hash, password, hash_result.salt.constSlice(), params, mode, null);
+        try kdf(allocator, hash, password, hash_result.salt.constSlice(), params, mode);
         if (!mem.eql(u8, hash, expected_hash)) return HasherError.PasswordVerificationFailed;
     }
 };
@@ -753,7 +656,6 @@ test "argon2d" {
         &salt,
         .{ .t = 3, .m = 32, .p = 4, .secret = &secret, .ad = &ad },
         .argon2d,
-        null,
     );
 
     const want = [_]u8{
@@ -779,7 +681,6 @@ test "argon2i" {
         &salt,
         .{ .t = 3, .m = 32, .p = 4, .secret = &secret, .ad = &ad },
         .argon2i,
-        null,
     );
 
     const want = [_]u8{
@@ -805,7 +706,6 @@ test "argon2id" {
         &salt,
         .{ .t = 3, .m = 32, .p = 4, .secret = &secret, .ad = &ad },
         .argon2id,
-        null,
     );
 
     const want = [_]u8{
@@ -1010,38 +910,15 @@ test "kdf" {
             salt,
             .{ .t = v.time, .m = v.memory, .p = v.threads },
             v.mode,
-            null,
         );
 
         try std.testing.expectEqualSlices(u8, &dk, &want);
     }
 }
 
-test "kdf hasher" {
-    const password = "testpass";
-    const salt = "saltsalt";
-
-    var dk: [13]u8 = undefined;
-    try kdf(
-        std.testing.allocator,
-        &dk,
-        password,
-        salt,
-        .{ .t = 3, .m = 32, .p = 4 },
-        .argon2id,
-        blake2.Blake2b(13 * 8),
-    );
-
-    const hash = "a5fe3f0b0fcb4b8b705d2cb908";
-    var want: [hash.len / 2]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&want, hash);
-
-    try std.testing.expectEqualSlices(u8, &dk, &want);
-}
-
 test "phc format hasher" {
-    const password = "testpass";
     const allocator = std.testing.allocator;
+    const password = "testpass";
 
     var buf: [128]u8 = undefined;
     const hash = try PhcFormatHasher.create(
@@ -1055,8 +932,8 @@ test "phc format hasher" {
 }
 
 test "password hash and password verify" {
-    const password = "testpass";
     const allocator = std.testing.allocator;
+    const password = "testpass";
 
     var buf: [128]u8 = undefined;
     const hash = try strHash(
@@ -1067,53 +944,20 @@ test "password hash and password verify" {
     try strVerify(hash, password, .{ .allocator = allocator });
 }
 
-test "kdf long derived key" {
+test "kdf derived key length" {
+    const allocator = std.testing.allocator;
+
     const password = "testpass";
     const salt = "saltsalt";
+    const params = Params{ .t = 3, .m = 32, .p = 4 };
+    const mode = Mode.argon2id;
 
-    var dk1: [96]u8 = undefined;
-    try kdf(
-        std.testing.allocator,
-        &dk1,
-        password,
-        salt,
-        .{ .t = 3, .m = 32, .p = 4 },
-        .argon2id,
-        null,
-    );
+    var dk1: [11]u8 = undefined;
+    try kdf(allocator, &dk1, password, salt, params, mode);
 
-    const hash1 = "46dea5a157e759fbba47266959adb96e" ++
-        "9c7b8410815ef25d539fec394bc69031" ++
-        "54f4b213c03008f7012ff20501cede60" ++
-        "6972174a08120f74014350099f854504" ++
-        "7dd48f37834da484686de9bbd7d1e8d4" ++
-        "c0eaeacbfed67982dd1bd3c17955b96c";
-    var want1: [hash1.len / 2]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&want1, hash1);
+    var dk2: [77]u8 = undefined;
+    try kdf(allocator, &dk2, password, salt, params, mode);
 
-    try std.testing.expectEqualSlices(u8, &dk1, &want1);
-
-    var dk2: [128]u8 = undefined;
-    try kdf(
-        std.testing.allocator,
-        &dk2,
-        password,
-        salt,
-        .{ .t = 3, .m = 32, .p = 4 },
-        .argon2id,
-        null,
-    );
-
-    const hash2 = "480fcb5859bb8250a5ffb10fcfd676d8" ++
-        "378748adebd7b73f34a0e0191fd66c6d" ++
-        "4abe42c44ea29396f37c81e3a1f943e4" ++
-        "e41fac1f4bdb3882a8e466bdff224dec" ++
-        "b681d64c8479d1affc21c07de3bb0b6a" ++
-        "35085a1921c50f44567ad3eb5c301856" ++
-        "61db48650edbdd717644a5e3f0d079d5" ++
-        "10ec3ded8f16217e263a6548ea9dbd90";
-    var want2: [hash2.len / 2]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&want2, hash2);
-
-    try std.testing.expectEqualSlices(u8, &dk2, &want2);
+    var dk3: [111]u8 = undefined;
+    try kdf(allocator, &dk3, password, salt, params, mode);
 }
