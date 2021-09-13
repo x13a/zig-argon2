@@ -3,6 +3,8 @@
 // https://github.com/P-H-C/phc-winner-argon2
 
 const std = @import("std");
+const builtin = @import("builtin");
+
 const blake2 = crypto.hash.blake2;
 const crypto = std.crypto;
 const math = std.math;
@@ -232,7 +234,7 @@ fn processBlocks(
     const lanes = memory / threads;
     const segments = lanes / sync_points;
 
-    if (threads == 1) {
+    if (builtin.single_threaded or threads == 1) {
         processBlocksSt(blocks, time, memory, threads, mode, lanes, segments);
     } else {
         try processBlocksMt(blocks, time, memory, threads, mode, lanes, segments);
