@@ -552,6 +552,8 @@ const PhcFormatHasher = struct {
         mode: Mode,
         buf: []u8,
     ) HasherError![]const u8 {
+        if (params.secret != null or params.ad != null) return HasherError.InvalidEncoding;
+
         var salt: [default_salt_len]u8 = undefined;
         crypto.random.bytes(&salt);
 
