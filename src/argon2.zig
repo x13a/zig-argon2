@@ -45,32 +45,10 @@ const max_hash_len = 64;
 /// Argon2id is a hybrid of Argon2i and Argon2d, using a combination of data-depending and 
 /// data-independent memory accesses, which gives some of Argon2i's resistance to side-channel 
 /// cache timing attacks and much of Argon2d's resistance to GPU cracking attacks.
-pub const Mode = enum(u2) {
-    const Self = @This();
-
+pub const Mode = enum {
     argon2d,
     argon2i,
     argon2id,
-
-    fn toString(self: Self) []const u8 {
-        return switch (self) {
-            Self.argon2d => "argon2d",
-            Self.argon2i => "argon2i",
-            Self.argon2id => "argon2id",
-        };
-    }
-
-    fn fromString(str: []const u8) EncodingError!Self {
-        if (mem.eql(u8, str, "argon2d")) {
-            return Self.argon2d;
-        } else if (mem.eql(u8, str, "argon2i")) {
-            return Self.argon2i;
-        } else if (mem.eql(u8, str, "argon2id")) {
-            return Self.argon2id;
-        } else {
-            return EncodingError.InvalidEncoding;
-        }
-    }
 };
 
 /// Argon2 parameters
@@ -511,7 +489,9 @@ pub fn kdf(
     params: Params,
     mode: Mode,
 ) KdfError!void {
-    if (derived_key.len < 4 or derived_key.len > max_int) return KdfError.OutputTooLong;
+    if (derived_key.len < 4) return KdfError.WeakParameters;
+    if (derived_key.len > max_int) return KdfError.OutputTooLong;
+
     if (password.len > max_int) return KdfError.WeakParameters;
     if (salt.len < 8 or salt.len > max_int) return KdfError.WeakParameters;
     if (params.t < 1 or params.p < 1) return KdfError.WeakParameters;
@@ -561,7 +541,7 @@ const PhcFormatHasher = struct {
         try kdf(allocator, &hash, password, &salt, params, mode);
 
         return phc_format.serialize(HashResult{
-            .alg_id = mode.toString(),
+            .alg_id = @tagName(mode),
             .alg_version = version,
             .m = params.m,
             .t = params.t,
@@ -578,7 +558,7 @@ const PhcFormatHasher = struct {
     ) HasherError!void {
         const hash_result = try phc_format.deserialize(HashResult, str);
 
-        const mode = Mode.fromString(hash_result.alg_id) catch
+        const mode = std.meta.stringToEnum(Mode, hash_result.alg_id) orelse
             return HasherError.PasswordVerificationFailed;
         if (hash_result.alg_version) |v| {
             if (v != version) return HasherError.InvalidEncoding;
