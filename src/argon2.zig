@@ -33,67 +33,65 @@ const max_salt_len = 64;
 const max_hash_len = 64;
 
 /// Argon2 type
-///
-/// Argon2d is faster and uses data-depending memory access, which makes it highly resistant 
-/// against GPU cracking attacks and suitable for applications with no threats from side-channel 
-/// timing attacks (eg. cryptocurrencies).
-///
-/// Argon2i instead uses data-independent memory access, which is preferred for password 
-/// hashing and password-based key derivation, but it is slower as it makes more passes over 
-/// the memory to protect from tradeoff attacks.
-///
-/// Argon2id is a hybrid of Argon2i and Argon2d, using a combination of data-depending and 
-/// data-independent memory accesses, which gives some of Argon2i's resistance to side-channel 
-/// cache timing attacks and much of Argon2d's resistance to GPU cracking attacks.
 pub const Mode = enum {
+    /// Argon2d is faster and uses data-depending memory access, which makes it highly resistant 
+    /// against GPU cracking attacks and suitable for applications with no threats from side-channel 
+    /// timing attacks (eg. cryptocurrencies).
     argon2d,
+
+    /// Argon2i instead uses data-independent memory access, which is preferred for password 
+    /// hashing and password-based key derivation, but it is slower as it makes more passes over 
+    /// the memory to protect from tradeoff attacks.
     argon2i,
+
+    /// Argon2id is a hybrid of Argon2i and Argon2d, using a combination of data-depending and 
+    /// data-independent memory accesses, which gives some of Argon2i's resistance to side-channel 
+    /// cache timing attacks and much of Argon2d's resistance to GPU cracking attacks.
     argon2id,
 };
 
 /// Argon2 parameters
-///
-/// A [t]ime cost, which defines the amount of computation realized and therefore the execution 
-/// time, given in number of iterations.
-///
-/// A [m]emory cost, which defines the memory usage, given in kibibytes.
-///
-/// A [p]arallelism degree, which defines the number of parallel threads.
-///
-/// The [secret] parameter, which is used for keyed hashing. This allows a secret key to be input 
-/// at hashing time (from some external location) and be folded into the value of the hash. This 
-/// means that even if your salts and hashes are compromised, an attacker cannot brute-force to 
-/// find the password without the key.
-///
-/// The [ad] parameter, which is used to fold any additional data into the hash value. Functionally, 
-/// this behaves almost exactly like the secret or salt parameters; the ad parameter is folding 
-/// into the value of the hash. However, this parameter is used for different data. The salt 
-/// should be a random string stored alongside your password. The secret should be a random key 
-/// only usable at hashing time. The ad is for any other data.
 pub const Params = struct {
     const Self = @This();
 
+    /// A [t]ime cost, which defines the amount of computation realized and therefore the execution 
+    /// time, given in number of iterations.
     t: u32,
+
+    /// A [m]emory cost, which defines the memory usage, given in kibibytes.
     m: u32,
+
+    /// A [p]arallelism degree, which defines the number of parallel threads.
     p: u24,
+
+    /// The [secret] parameter, which is used for keyed hashing. This allows a secret key to be input 
+    /// at hashing time (from some external location) and be folded into the value of the hash. This 
+    /// means that even if your salts and hashes are compromised, an attacker cannot brute-force to 
+    /// find the password without the key.
     secret: ?[]const u8 = null,
+
+    /// The [ad] parameter, which is used to fold any additional data into the hash value. Functionally, 
+    /// this behaves almost exactly like the secret or salt parameters; the ad parameter is folding 
+    /// into the value of the hash. However, this parameter is used for different data. The salt 
+    /// should be a random string stored alongside your password. The secret should be a random key 
+    /// only usable at hashing time. The ad is for any other data.
     ad: ?[]const u8 = null,
 
     /// Baseline parameters for interactive logins using argon2i type
     pub const interactive_2i = Self.fromLimits(4, 33554432);
-    /// Baseline parameters for .. using argon2i type
+    /// Baseline parameters for normal usage using argon2i type
     pub const moderate_2i = Self.fromLimits(6, 134217728);
     /// Baseline parameters for offline usage using argon2i type
     pub const sensitive_2i = Self.fromLimits(8, 536870912);
 
     /// Baseline parameters for interactive logins using argon2id type
     pub const interactive_2id = Self.fromLimits(2, 67108864);
-    /// Baseline parameters for .. using argon2id type
+    /// Baseline parameters for normal usage using argon2id type
     pub const moderate_2id = Self.fromLimits(3, 268435456);
     /// Baseline parameters for offline usage using argon2id type
     pub const sensitive_2id = Self.fromLimits(4, 1073741824);
 
-    /// Create parameters from ops and mem limits
+    /// Create parameters from ops and mem limits, where mem_limit given in bytes
     pub fn fromLimits(ops_limit: u32, mem_limit: usize) Self {
         const m = mem_limit / 1024;
         std.debug.assert(m <= max_int);
