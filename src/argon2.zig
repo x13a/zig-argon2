@@ -18,9 +18,9 @@ const Blocks = std.ArrayListAligned([block_length]u64, 16);
 const H0 = [Blake2b512.digest_length + 8]u8;
 
 const EncodingError = crypto.errors.EncodingError;
-const KdfError = pwhash.KdfError || Thread.SpawnError;
-const HasherError = pwhash.HasherError || KdfError;
-const Error = pwhash.Error || HasherError;
+const KdfError = pwhash.KdfError;
+const HasherError = pwhash.HasherError;
+const Error = pwhash.Error;
 
 const version = 0x13;
 const block_length = 128;
